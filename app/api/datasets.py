@@ -22,6 +22,14 @@ def export_dataset_jsonl() -> str:
                     "task_type": conversation.task_type,
                     "scenario": conversation.scenario,
                     "task_input": conversation.task_input,
+                    "generation_mode": conversation.generation_mode,
+                    "llm_provider": conversation.llm_provider,
+                    "llm_model": conversation.llm_model,
+                    "scoring_mode": conversation.scoring_mode,
+                    "scoring_provider": conversation.scoring_provider,
+                    "scoring_model": conversation.scoring_model,
+                    "scoring_error": conversation.scoring_error,
+                    "score_feedback": conversation.score_feedback,
                     "agents": [agent.model_dump() for agent in conversation.agents],
                     "messages": [
                         {"role": message.role, "content": message.content}
@@ -33,4 +41,3 @@ def export_dataset_jsonl() -> str:
             )
         )
     return "\n".join(rows)
-

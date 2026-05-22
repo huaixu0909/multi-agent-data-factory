@@ -4,8 +4,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.core.llm import LLMGenerationResult, build_deepseek_client
 from app.core.models import ConversationRecord, Message, Persona, QualityScores
 from app.core.scenario import Scenario
+from app.core.scoring import score_conversation_quality
 
 
 class CodeReviewSimulationRequest(BaseModel):
@@ -25,16 +27,37 @@ class CodeIssue(BaseModel):
 class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
     name = "code_review"
     title = "Code Review 数据合成"
-    description = "模拟 Developer、Reviewer、Challenger、Judge 的代码审查讨论。"
-    status = "v0.2 / scenario-ready"
+    description = "模拟 Developer、Reviewer、Challenger、Judge 的中文代码审查讨论。"
+    status = "v0.4 / LLM Judge"
     endpoint = "/api/simulations/code-review"
     agent_roles = ["Developer", "Reviewer", "Challenger", "Judge"]
 
     def simulate(self, request: CodeReviewSimulationRequest) -> ConversationRecord:
         agents = self.generate_personas(request.review_focus)
         issues = self.detect_code_issues(request.code_diff, request.language)
-        messages = self.generate_messages(agents, issues, request.max_turns)
-        scores = self.score_conversation(messages, issues)
+        generation_mode = "mock"
+        llm_provider: str | None = None
+        llm_model: str | None = None
+        llm_error: str | None = None
+
+        try:
+            llm_result = self.generate_llm_messages(request, agents, issues)
+            messages = self.normalize_llm_messages(llm_result.messages, agents, request.max_turns)
+            generation_mode = "llm"
+            llm_provider = llm_result.provider
+            llm_model = llm_result.model
+        except Exception as error:
+            messages = self.generate_messages(agents, issues, request.max_turns)
+            llm_error = str(error)[:500]
+
+        scoring_result = score_conversation_quality(
+            scenario=self.name,
+            task_input=request.model_dump(),
+            agents=agents,
+            messages=messages,
+            issue_hints=[issue.model_dump() for issue in issues],
+        )
+        scores = scoring_result.scores
         return ConversationRecord(
             conversation_id=f"conv_{uuid.uuid4().hex[:12]}",
             task_type=self.name,
@@ -47,6 +70,15 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
             messages=messages,
             scores=scores,
             accepted=scores.final_score >= 7.0,
+            generation_mode=generation_mode,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            llm_error=llm_error,
+            scoring_mode=scoring_result.mode,
+            scoring_provider=scoring_result.provider,
+            scoring_model=scoring_result.model,
+            scoring_error=scoring_result.error,
+            score_feedback=scoring_result.feedback or [],
             created_at=datetime.now(timezone.utc).isoformat(),
         )
 
@@ -56,38 +88,38 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
             Persona(
                 agent_id="agent_developer",
                 role="Developer",
-                personality="pragmatic",
-                style="defensive but cooperative",
-                focus="shipping speed and implementation intent",
-                goal="explain the change and get the review accepted",
-                tolerance="medium",
+                personality="务实、略带防守",
+                style="解释实现意图，但愿意接受证据充分的修改建议",
+                focus="交付速度、改动范围、实现成本",
+                goal="说明为什么这样改，并尽量让评审通过",
+                tolerance="中",
             ),
             Persona(
                 agent_id="agent_reviewer",
                 role="Reviewer",
-                personality="strict",
-                style="precise and evidence-driven",
+                personality="严格、证据导向",
+                style="直接指出风险，并要求可执行的修复方案",
                 focus=focus_text,
-                goal="identify concrete risks and request actionable fixes",
-                tolerance="low",
+                goal="识别具体代码风险，推动补测试和安全修复",
+                tolerance="低",
             ),
             Persona(
                 agent_id="agent_challenger",
                 role="Challenger",
-                personality="skeptical",
-                style="argumentative and alternative-seeking",
-                focus="edge cases and trade-offs",
-                goal="increase reasoning depth by challenging easy conclusions",
-                tolerance="low",
+                personality="怀疑主义、喜欢追问边界",
+                style="反驳过于轻松的结论，提出替代方案",
+                focus="边界条件、长期维护成本、架构取舍",
+                goal="制造有价值的技术冲突，提升讨论深度",
+                tolerance="低",
             ),
             Persona(
                 agent_id="agent_judge",
                 role="Judge",
-                personality="balanced",
-                style="concise and criteria-based",
-                focus="training data quality and final decision",
-                goal="summarize the discussion and label the review outcome",
-                tolerance="high",
+                personality="平衡、标准清晰",
+                style="根据证据总结争议点和最终结论",
+                focus="训练数据质量、结论可执行性、讨论一致性",
+                goal="总结讨论并给出是否通过评审的判断",
+                tolerance="高",
             ),
         ]
 
@@ -100,43 +132,43 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
                 "security",
                 "high",
                 ["select ", " where ", "f\"", "format(", "%"],
-                "Potential SQL injection or unsafe query construction. Prefer parameterized queries.",
+                "可能存在 SQL 注入或不安全的查询拼接，建议改为参数化查询。",
             ),
             (
                 "security",
                 "high",
                 ["eval(", "exec("],
-                "Dynamic code execution can become remote code execution. Remove eval/exec or sandbox strictly.",
+                "动态执行代码可能演变为远程代码执行风险，应移除 eval/exec 或进行严格沙箱隔离。",
             ),
             (
                 "secret",
                 "high",
                 ["api_key", "password", "secret", "token"],
-                "Possible hardcoded secret. Move sensitive values into environment variables or a secret manager.",
+                "疑似硬编码敏感信息，应迁移到环境变量或密钥管理服务。",
             ),
             (
                 "reliability",
                 "medium",
                 ["except:", "except exception"],
-                "Broad exception handling can hide failures. Catch specific exceptions and log context.",
+                "宽泛异常捕获会隐藏真实故障，应捕获具体异常并记录上下文。",
             ),
             (
                 "observability",
                 "low",
                 ["print("],
-                "Debug prints are not production logging. Use structured logging with request context.",
+                "调试 print 不适合作为生产日志，应改为带上下文的结构化日志。",
             ),
             (
                 "performance",
                 "medium",
                 ["for ", "query(", "select "],
-                "Loop-level database calls may create N+1 queries. Batch loading or prefetching may be safer.",
+                "循环内数据库调用可能造成 N+1 查询，建议批量加载或预取。",
             ),
             (
                 "testing",
                 "medium",
                 ["def ", "class ", "return "],
-                "The diff appears functional but has no visible test update. Add a regression test for the changed behavior.",
+                "该 diff 有功能逻辑变化，但没有看到测试更新，应补充回归测试。",
             ),
         ]
 
@@ -165,7 +197,7 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
                     issue_type="maintainability",
                     severity="medium",
                     evidence="No obvious syntactic risk was detected from simple heuristics.",
-                    suggestion="Ask reviewers to focus on naming, boundary conditions, tests, and rollback behavior.",
+                    suggestion="建议评审重点关注命名、边界条件、测试覆盖和回滚行为。",
                 )
             )
 
@@ -181,6 +213,87 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
     def build_message(self, turn: int, agent: Persona, content: str) -> Message:
         return Message(turn=turn, agent_id=agent.agent_id, role=agent.role, content=content)
 
+    def generate_llm_messages(
+        self,
+        request: CodeReviewSimulationRequest,
+        agents: list[Persona],
+        issues: list[CodeIssue],
+    ) -> LLMGenerationResult:
+        client = build_deepseek_client()
+        system_prompt = (
+            "你是一名资深 AI 数据合成工程师，负责生成中文 Code Review 多 Agent 训练数据。"
+            "你必须只输出 JSON 对象，不要输出 Markdown，不要输出解释。"
+            "对话要自然、具体、有真实技术冲突，不能泛泛而谈。"
+        )
+        user_prompt = self.build_llm_prompt(request, agents, issues)
+        return client.chat_json(system_prompt, user_prompt)
+
+    def build_llm_prompt(
+        self,
+        request: CodeReviewSimulationRequest,
+        agents: list[Persona],
+        issues: list[CodeIssue],
+    ) -> str:
+        personas = "\n".join(
+            f"- {agent.role}: 性格={agent.personality}; 风格={agent.style}; 目标={agent.goal}; 关注={agent.focus}"
+            for agent in agents
+        )
+        issue_hints = "\n".join(
+            f"- {issue.severity} / {issue.issue_type}: 证据 `{issue.evidence}`；建议：{issue.suggestion}"
+            for issue in issues
+        )
+        return f"""
+请基于下面信息生成一段中文 Code Review 多 Agent 对话数据。
+
+硬性要求：
+1. 输出 JSON，格式必须是：{{"messages":[{{"role":"Developer","content":"..."}}]}}。
+2. role 只能使用 Developer、Reviewer、Challenger、Judge。
+3. messages 数量必须是 {request.max_turns} 条。
+4. content 必须是中文，允许保留代码变量名、函数名、SQL 片段。
+5. Reviewer 必须引用 diff 中的具体证据。
+6. Challenger 必须提出反驳或替代方案，制造真实技术冲突。
+7. Developer 必须有解释、让步或修复承诺。
+8. Judge 必须在最后一轮给出结论：通过、请求修改，或需要补充信息。
+9. 不要编造 diff 中完全不存在的业务背景。
+
+Agent Persona：
+{personas}
+
+识别到的问题线索：
+{issue_hints}
+
+语言：{request.language}
+Review Focus：{", ".join(request.review_focus)}
+
+代码 diff：
+```diff
+{request.code_diff}
+```
+""".strip()
+
+    def normalize_llm_messages(
+        self,
+        raw_messages: list[dict[str, str]],
+        agents: list[Persona],
+        max_turns: int,
+    ) -> list[Message]:
+        agents_by_role = {agent.role: agent for agent in agents}
+        normalized: list[Message] = []
+        for item in raw_messages:
+            role = item.get("role", "").strip()
+            content = item.get("content", "").strip()
+            agent = agents_by_role.get(role)
+            if agent is None or not content:
+                continue
+            normalized.append(self.build_message(len(normalized) + 1, agent, content))
+            if len(normalized) >= max_turns:
+                break
+
+        if len(normalized) < max_turns:
+            raise RuntimeError("LLM response did not contain enough valid role messages")
+
+        return normalized
+
     def generate_messages(
         self,
         agents: list[Persona],
@@ -194,42 +307,42 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
             self.build_message(
                 1,
                 developer,
-                "I submitted this diff to unblock the feature quickly. The intent is to keep the change small and avoid touching unrelated modules.",
+                "我提交这个 diff 是为了尽快打通功能链路，改动范围刻意压得比较小，避免牵连其他模块。",
             ),
             self.build_message(
                 2,
                 reviewer,
-                f"I see a {primary.severity}-severity {primary.issue_type} risk. Evidence: `{primary.evidence}`. {primary.suggestion}",
+                f"我看到一个 {primary.severity} 级别的 {primary.issue_type} 风险。证据是：`{primary.evidence}`。{primary.suggestion}",
             ),
             self.build_message(
                 3,
                 developer,
-                "That concern is fair, but the input currently comes from an internal path. I chose the smaller change because the release is time-sensitive.",
+                "这个担心有道理，不过当前输入来自内部链路。我选择较小改动主要是因为发布时间比较紧。",
             ),
             self.build_message(
                 4,
                 challenger,
-                "Internal input is not a stable safety boundary. If this code path is reused later, the risk becomes invisible. We should fix the design rather than rely on caller discipline.",
+                "内部输入不能当作稳定的安全边界。这个路径后续一旦被复用，风险会变得很隐蔽，应该从设计上修掉，而不是依赖调用方自觉。",
             ),
             self.build_message(
                 5,
                 reviewer,
-                f"There is also a {secondary.issue_type} concern: `{secondary.evidence}`. The review should require a test or a safer implementation before approval.",
+                f"还有一个 {secondary.issue_type} 问题：`{secondary.evidence}`。在通过评审前，至少需要补一个测试，或者换成更安全的实现。",
             ),
             self.build_message(
                 6,
                 developer,
-                "I can update the patch with a safer implementation and add a regression test. I would prefer not to expand the scope beyond the risky path.",
+                "我可以把这块改成更安全的实现，并补一个回归测试。但我希望修复范围只覆盖这个风险路径，暂时不扩大重构。",
             ),
             self.build_message(
                 7,
                 challenger,
-                "A narrow fix is acceptable if the test proves the risky case. Otherwise this becomes a style-only review and loses training value.",
+                "窄范围修复可以接受，但测试必须能证明风险场景。否则这次讨论就会变成风格争论，训练价值也会下降。",
             ),
             self.build_message(
                 8,
                 judge,
-                "Decision: request changes. The discussion contains a concrete risk, evidence from the diff, a counterargument, and an actionable resolution. This is useful code review training data.",
+                "结论：请求修改。当前讨论包含具体风险、diff 证据、反驳观点和可执行修复方案，适合作为 Code Review 训练数据。",
             ),
         ]
 
@@ -239,7 +352,7 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
                 self.build_message(
                     7,
                     reviewer,
-                    "Please include the exact failure mode in the test name so future maintainers understand why the safer path exists.",
+                    "请把失败模式写进测试名称里，让后续维护者能理解为什么这里必须走更安全的实现。",
                 ),
             )
             messages.insert(
@@ -247,7 +360,7 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
                 self.build_message(
                     8,
                     developer,
-                    "Agreed. I will add the test name and keep the implementation localized to this function.",
+                    "同意。我会补充更明确的测试名称，并把实现限制在当前函数内，避免扩大影响面。",
                 ),
             )
 
@@ -261,9 +374,25 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
         conflict_signals = sum(
             1
             for item in messages
-            if any(token in item.content.lower() for token in ["risk", "concern", "not", "should", "otherwise"])
+            if any(
+                token in item.content.lower()
+                for token in [
+                    "risk",
+                    "concern",
+                    "not",
+                    "should",
+                    "otherwise",
+                    "风险",
+                    "担心",
+                    "不能",
+                    "应该",
+                    "否则",
+                    "问题",
+                    "反驳",
+                ]
+            )
         )
-        evidence_count = sum(1 for item in messages if "`" in item.content or "Evidence:" in item.content)
+        evidence_count = sum(1 for item in messages if "`" in item.content or "证据" in item.content or "Evidence:" in item.content)
         high_severity = sum(1 for issue in issues if issue.severity == "high")
 
         realism = min(10.0, 6.2 + len(messages) * 0.18 + role_count * 0.35)
@@ -297,4 +426,3 @@ class CodeReviewScenario(Scenario[CodeReviewSimulationRequest]):
 
 
 code_review_scenario = CodeReviewScenario()
-

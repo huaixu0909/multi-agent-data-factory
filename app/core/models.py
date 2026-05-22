@@ -54,6 +54,15 @@ class ConversationRecord(BaseModel):
     messages: list[Message]
     scores: QualityScores
     accepted: bool
+    generation_mode: str = "mock"
+    llm_provider: str | None = None
+    llm_model: str | None = None
+    llm_error: str | None = None
+    scoring_mode: str = "heuristic"
+    scoring_provider: str | None = None
+    scoring_model: str | None = None
+    scoring_error: str | None = None
+    score_feedback: list[str] = Field(default_factory=list)
     created_at: str
 
 
@@ -74,4 +83,3 @@ class ScenarioDescriptor(BaseModel):
 class ScenarioListResponse(BaseModel):
     items: list[ScenarioDescriptor]
     total: int
-

@@ -35,6 +35,15 @@ def initialize_database() -> None:
                 messages TEXT NOT NULL,
                 scores TEXT NOT NULL,
                 accepted INTEGER NOT NULL DEFAULT 0,
+                generation_mode TEXT NOT NULL DEFAULT 'mock',
+                llm_provider TEXT,
+                llm_model TEXT,
+                llm_error TEXT,
+                scoring_mode TEXT NOT NULL DEFAULT 'heuristic',
+                scoring_provider TEXT,
+                scoring_model TEXT,
+                scoring_error TEXT,
+                score_feedback TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL
             )
             """
@@ -44,6 +53,15 @@ def initialize_database() -> None:
         _ensure_column(connection, "conversations", "language", "TEXT")
         _ensure_column(connection, "conversations", "code_diff", "TEXT")
         _ensure_column(connection, "conversations", "review_focus", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "conversations", "generation_mode", "TEXT NOT NULL DEFAULT 'mock'")
+        _ensure_column(connection, "conversations", "llm_provider", "TEXT")
+        _ensure_column(connection, "conversations", "llm_model", "TEXT")
+        _ensure_column(connection, "conversations", "llm_error", "TEXT")
+        _ensure_column(connection, "conversations", "scoring_mode", "TEXT NOT NULL DEFAULT 'heuristic'")
+        _ensure_column(connection, "conversations", "scoring_provider", "TEXT")
+        _ensure_column(connection, "conversations", "scoring_model", "TEXT")
+        _ensure_column(connection, "conversations", "scoring_error", "TEXT")
+        _ensure_column(connection, "conversations", "score_feedback", "TEXT NOT NULL DEFAULT '[]'")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at DESC)"
         )
@@ -75,6 +93,15 @@ def conversation_to_row(conversation: ConversationRecord) -> tuple:
         json.dumps([message.model_dump() for message in conversation.messages], ensure_ascii=False),
         json.dumps(conversation.scores.model_dump(), ensure_ascii=False),
         1 if conversation.accepted else 0,
+        conversation.generation_mode,
+        conversation.llm_provider,
+        conversation.llm_model,
+        conversation.llm_error,
+        conversation.scoring_mode,
+        conversation.scoring_provider,
+        conversation.scoring_model,
+        conversation.scoring_error,
+        json.dumps(conversation.score_feedback, ensure_ascii=False),
         conversation.created_at,
     )
 
@@ -85,6 +112,15 @@ def row_to_conversation(row: sqlite3.Row) -> ConversationRecord:
     language = row["language"] if "language" in row.keys() else None
     code_diff = row["code_diff"] if "code_diff" in row.keys() else None
     review_focus_raw = row["review_focus"] if "review_focus" in row.keys() else "[]"
+    generation_mode = row["generation_mode"] if "generation_mode" in row.keys() else "mock"
+    llm_provider = row["llm_provider"] if "llm_provider" in row.keys() else None
+    llm_model = row["llm_model"] if "llm_model" in row.keys() else None
+    llm_error = row["llm_error"] if "llm_error" in row.keys() else None
+    scoring_mode = row["scoring_mode"] if "scoring_mode" in row.keys() else "heuristic"
+    scoring_provider = row["scoring_provider"] if "scoring_provider" in row.keys() else None
+    scoring_model = row["scoring_model"] if "scoring_model" in row.keys() else None
+    scoring_error = row["scoring_error"] if "scoring_error" in row.keys() else None
+    score_feedback_raw = row["score_feedback"] if "score_feedback" in row.keys() else "[]"
 
     return ConversationRecord(
         conversation_id=str(row["conversation_id"]),
@@ -98,6 +134,15 @@ def row_to_conversation(row: sqlite3.Row) -> ConversationRecord:
         messages=[Message(**item) for item in json.loads(str(row["messages"] or "[]"))],
         scores=QualityScores(**json.loads(str(row["scores"] or "{}"))),
         accepted=bool(row["accepted"]),
+        generation_mode=str(generation_mode or "mock"),
+        llm_provider=str(llm_provider) if llm_provider is not None else None,
+        llm_model=str(llm_model) if llm_model is not None else None,
+        llm_error=str(llm_error) if llm_error is not None else None,
+        scoring_mode=str(scoring_mode or "heuristic"),
+        scoring_provider=str(scoring_provider) if scoring_provider is not None else None,
+        scoring_model=str(scoring_model) if scoring_model is not None else None,
+        scoring_error=str(scoring_error) if scoring_error is not None else None,
+        score_feedback=json.loads(str(score_feedback_raw or "[]")),
         created_at=str(row["created_at"]),
     )
 
@@ -109,9 +154,12 @@ def save_conversation(conversation: ConversationRecord) -> None:
             """
             INSERT OR REPLACE INTO conversations (
                 conversation_id, task_type, scenario, task_input, language, code_diff,
-                review_focus, agents, messages, scores, accepted, created_at
+                review_focus, agents, messages, scores, accepted,
+                generation_mode, llm_provider, llm_model, llm_error,
+                scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             conversation_to_row(conversation),
         )
@@ -125,7 +173,10 @@ def load_conversations(scenario: str | None = None) -> list[ConversationRecord]:
             rows = connection.execute(
                 """
                 SELECT conversation_id, task_type, scenario, task_input, language, code_diff,
-                       review_focus, agents, messages, scores, accepted, created_at
+                       review_focus, agents, messages, scores, accepted,
+                       generation_mode, llm_provider, llm_model, llm_error,
+                       scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                       created_at
                 FROM conversations
                 WHERE scenario = ?
                 ORDER BY created_at DESC
@@ -136,7 +187,10 @@ def load_conversations(scenario: str | None = None) -> list[ConversationRecord]:
             rows = connection.execute(
                 """
                 SELECT conversation_id, task_type, scenario, task_input, language, code_diff,
-                       review_focus, agents, messages, scores, accepted, created_at
+                       review_focus, agents, messages, scores, accepted,
+                       generation_mode, llm_provider, llm_model, llm_error,
+                       scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                       created_at
                 FROM conversations
                 ORDER BY created_at DESC
                 """
@@ -150,7 +204,10 @@ def find_conversation(conversation_id: str) -> ConversationRecord:
         row = connection.execute(
             """
             SELECT conversation_id, task_type, scenario, task_input, language, code_diff,
-                   review_focus, agents, messages, scores, accepted, created_at
+                   review_focus, agents, messages, scores, accepted,
+                   generation_mode, llm_provider, llm_model, llm_error,
+                   scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                   created_at
             FROM conversations
             WHERE conversation_id = ?
             """,
@@ -160,4 +217,3 @@ def find_conversation(conversation_id: str) -> ConversationRecord:
     if row is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return row_to_conversation(row)
-
