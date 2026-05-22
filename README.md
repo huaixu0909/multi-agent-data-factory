@@ -2,11 +2,11 @@
 
 多 Agent 社会模拟数据合成平台第一版。
 
-当前版本：`v0.6.0`
+当前版本：`v0.7.0`
 
 ## 项目定位
 
-本项目用于生成高质量 AI 训练对话数据。当前阶段已经支持 Code Review、客服投诉、技术面试三个数据合成场景，并接入 DeepSeek / OpenAI-compatible Chat Completions。v0.6 新增技术面试场景，用于模拟面试官提问、候选人回答、深度追问和能力评分。
+本项目用于生成高质量 AI 训练对话数据。当前阶段已经支持 Code Review、客服投诉、技术面试三个数据合成场景，并接入 DeepSeek / OpenAI-compatible Chat Completions。v0.7 强化了前端多场景控制台，支持中文角色展示、输入模板、历史记录、JSONL 导出和结果 JSON 复制。
 
 ## 当前功能
 
@@ -15,6 +15,12 @@
 - Code Review 多 Agent 中文对话生成
 - 客服投诉多 Agent 中文对话生成
 - 技术面试多 Agent 中文对话生成
+- 前端多场景控制台
+- 中文 Agent 角色展示
+- 场景模板切换
+- 最近生成记录查看
+- JSONL 导出入口
+- 单条结果 JSON 复制
 - 支持 DeepSeek API 真实 LLM 生成
 - 未配置 API key 时自动回退到本地中文 mock
 - 质量评分器：规则评分 + DeepSeek LLM-as-a-Judge
@@ -252,6 +258,6 @@ GET /api/conversations?scenario=code_review
 
 ## 下一步计划
 
-- v0.7：前端多场景控制台增强
 - v0.8：数据筛选、搜索和批量导出
 - v0.9：Persona 生成器与场景模板管理
+- v1.0：数据集版本管理
