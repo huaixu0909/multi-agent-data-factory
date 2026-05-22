@@ -12,10 +12,14 @@ from app.core.database import ensure_data_dirs
 from app.core.models import HealthResponse
 from app.core.registry import registry
 from app.scenarios.code_review import code_review_scenario
+from app.scenarios.customer_complaint import customer_complaint_scenario
+from app.scenarios.technical_interview import technical_interview_scenario
 
 
 def create_app() -> FastAPI:
     registry.register(code_review_scenario)
+    registry.register(customer_complaint_scenario)
+    registry.register(technical_interview_scenario)
 
     application = FastAPI(
         title="Multi-Agent Synthetic Data Factory",
@@ -67,4 +71,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-

@@ -161,7 +161,7 @@ def build_judge_prompt(
 - diversity：角色观点是否多样
 - consistency：上下文是否一致，是否自相矛盾
 - conflict：是否有真实冲突、追问和反驳
-- training_value：是否适合训练 Code Review / Coding Agent
+- training_value：是否适合训练该场景对应的业务 Agent
 - safety：是否避免泄露、攻击、违法或不可控内容
 - final_score：综合分
 
@@ -182,7 +182,7 @@ def build_judge_prompt(
 
 要求：
 1. 不要因为文本是 AI 生成就自动给高分。
-2. 如果对话没有引用 diff 证据，consistency 和 training_value 应降低。
+2. 如果对话没有引用任务输入或问题线索中的关键信息，consistency 和 training_value 应降低。
 3. 如果角色说话风格没有差异，diversity 应降低。
 4. 如果冲突只是口号，没有技术细节，conflict 应降低。
 5. feedback 必须指出最重要的优点和风险。
@@ -266,4 +266,3 @@ def build_quality_scores(
 
 def clamp_score(value: float) -> float:
     return max(0.0, min(10.0, value))
-

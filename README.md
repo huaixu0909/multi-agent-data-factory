@@ -2,17 +2,19 @@
 
 多 Agent 社会模拟数据合成平台第一版。
 
-当前版本：`v0.4.0`
+当前版本：`v0.6.0`
 
 ## 项目定位
 
-本项目用于生成高质量 AI 训练对话数据。当前阶段聚焦 Code Review 数据合成，同时已经把后端重构为通用 Scenario 架构，并接入 DeepSeek / OpenAI-compatible Chat Completions，让 Code Review 对话由真实 LLM 生成中文训练数据。v0.4 增加了质量评分器，支持规则评分与 LLM-as-a-Judge 自动评估。
+本项目用于生成高质量 AI 训练对话数据。当前阶段已经支持 Code Review、客服投诉、技术面试三个数据合成场景，并接入 DeepSeek / OpenAI-compatible Chat Completions。v0.6 新增技术面试场景，用于模拟面试官提问、候选人回答、深度追问和能力评分。
 
 ## 当前功能
 
 - FastAPI 后端服务
 - 通用 Scenario 注册与路由结构
 - Code Review 多 Agent 中文对话生成
+- 客服投诉多 Agent 中文对话生成
+- 技术面试多 Agent 中文对话生成
 - 支持 DeepSeek API 真实 LLM 生成
 - 未配置 API key 时自动回退到本地中文 mock
 - 质量评分器：规则评分 + DeepSeek LLM-as-a-Judge
@@ -72,7 +74,7 @@ DEEPSEEK_TIMEOUT_SECONDS=45
 - 如果没有配置 `DEEPSEEK_API_KEY`，接口仍然可用，但会回退到 `mock` 模式。
 - 如果 DeepSeek 调用失败，系统也会回退到本地中文 mock，并在返回结果里写入 `llm_error`。
 
-## v0.4 架构
+## v0.5 架构
 
 ```text
 app/
@@ -92,13 +94,15 @@ app/
     scenario.py           Scenario 抽象基类
   scenarios/
     code_review.py        Code Review 场景实现
+    customer_complaint.py 客服投诉场景实现
+    technical_interview.py 技术面试场景实现
 ```
 
 核心流程：
 
 ```text
-Code Diff
--> 识别风险线索
+Scenario Input
+-> 识别场景问题线索
 -> 生成 Agent Persona
 -> 优先调用 DeepSeek 生成中文多 Agent 对话
 -> 失败时回退本地中文 mock
@@ -164,6 +168,42 @@ http://localhost:8001/api/scenarios
 }
 ```
 
+### POST /api/simulations/customer-complaint
+
+生成一条客服投诉多 Agent 中文对话。
+
+请求示例：
+
+```json
+{
+  "industry": "电商",
+  "complaint_type": "退款纠纷",
+  "customer_profile": "老用户，最近一次订单体验很差",
+  "complaint_detail": "商品显示已发货，但物流三天没有更新。客服一直让我等，现在我要求退款并给出明确处理时间。",
+  "company_policy": "支持在符合规则时退款；涉及高额赔付时需要升级主管审核；客服必须避免承诺超出政策范围的补偿。",
+  "emotion_level": "high",
+  "max_turns": 8
+}
+```
+
+### POST /api/simulations/technical-interview
+
+生成一条技术面试多 Agent 中文对话。
+
+请求示例：
+
+```json
+{
+  "target_role": "AI 工程师",
+  "candidate_level": "中级",
+  "topic": "RAG",
+  "difficulty": "medium",
+  "candidate_profile": "候选人有 Python、FastAPI 和本地 RAG Demo 经验，但生产级监控、评估和故障恢复经验较少。",
+  "interview_context": "希望考察候选人是否理解 RAG 的检索、chunking、相似度阈值、上下文拼接和幻觉控制。",
+  "max_turns": 8
+}
+```
+
 响应里会包含：
 
 ```json
@@ -212,7 +252,6 @@ GET /api/conversations?scenario=code_review
 
 ## 下一步计划
 
-- v0.5：客服投诉场景
-- v0.6：技术面试场景
-- v0.7：前端多场景控制台
+- v0.7：前端多场景控制台增强
 - v0.8：数据筛选、搜索和批量导出
+- v0.9：Persona 生成器与场景模板管理

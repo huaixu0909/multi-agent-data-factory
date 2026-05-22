@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 AgentRole = str
-ScenarioName = Literal["code_review"]
+ScenarioName = Literal["code_review", "customer_complaint", "technical_interview"]
 
 
 class HealthResponse(BaseModel):
