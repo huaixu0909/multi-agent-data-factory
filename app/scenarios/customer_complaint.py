@@ -4,10 +4,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.core.database import select_personas_for_scenario
 from app.core.llm import LLMGenerationResult, build_deepseek_client
 from app.core.models import ConversationRecord, Message, Persona
 from app.core.scenario import Scenario
-from app.core.scoring import score_conversation_quality
+from app.core.workflow import run_langgraph_simulation
 
 
 EmotionLevel = Literal["low", "medium", "high", "extreme"]
@@ -44,28 +45,16 @@ class CustomerComplaintScenario(Scenario[CustomerComplaintSimulationRequest]):
     def simulate(self, request: CustomerComplaintSimulationRequest) -> ConversationRecord:
         agents = self.generate_personas(request)
         signals = self.detect_complaint_signals(request)
-        generation_mode = "mock"
-        llm_provider: str | None = None
-        llm_model: str | None = None
-        llm_error: str | None = None
-
-        try:
-            llm_result = self.generate_llm_messages(request, agents, signals)
-            messages = self.normalize_llm_messages(llm_result.messages, agents, request.max_turns)
-            generation_mode = "llm"
-            llm_provider = llm_result.provider
-            llm_model = llm_result.model
-        except Exception as error:
-            messages = self.generate_messages(request, agents, signals)
-            llm_error = str(error)[:500]
-
         task_input = request.model_dump()
-        scoring_result = score_conversation_quality(
+        mock_messages = self.generate_messages(request, agents, signals)
+        workflow_result = run_langgraph_simulation(
             scenario=self.name,
+            scenario_instructions=self.agent_node_instructions(),
             task_input=task_input,
             agents=agents,
-            messages=messages,
             issue_hints=[signal.model_dump() for signal in signals],
+            max_turns=request.max_turns,
+            mock_messages=mock_messages,
         )
 
         return ConversationRecord(
@@ -74,23 +63,36 @@ class CustomerComplaintScenario(Scenario[CustomerComplaintSimulationRequest]):
             scenario=self.name,
             task_input=task_input,
             agents=agents,
-            messages=messages,
-            scores=scoring_result.scores,
-            accepted=scoring_result.scores.final_score >= 7.0,
-            generation_mode=generation_mode,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
-            llm_error=llm_error,
-            scoring_mode=scoring_result.mode,
-            scoring_provider=scoring_result.provider,
-            scoring_model=scoring_result.model,
-            scoring_error=scoring_result.error,
-            score_feedback=scoring_result.feedback or [],
+            messages=workflow_result.messages,
+            scores=workflow_result.scores,
+            accepted=workflow_result.accepted,
+            generation_mode=workflow_result.generation_mode,
+            llm_provider=workflow_result.llm_provider,
+            llm_model=workflow_result.llm_model,
+            llm_error=workflow_result.llm_error,
+            scoring_mode=workflow_result.scoring_mode,
+            scoring_provider=workflow_result.scoring_provider,
+            scoring_model=workflow_result.scoring_model,
+            scoring_error=workflow_result.scoring_error,
+            score_feedback=workflow_result.score_feedback,
+            workflow_engine=workflow_result.workflow_engine,
+            workflow_steps=workflow_result.workflow_steps,
+            agent_trace=workflow_result.agent_trace,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def agent_node_instructions(self) -> str:
+        return (
+            "这是客服投诉数据合成场景。每个 Agent 节点只能生成自己这一轮的一条中文发言。"
+            "Customer 表达真实诉求与情绪变化；SupportAgent 先共情再澄清事实；"
+            "ComplianceReviewer 约束政策边界；EscalationManager 给出升级路径和闭环动作。"
+        )
+
     def generate_personas(self, request: CustomerComplaintSimulationRequest) -> list[Persona]:
-        return [
+        return select_personas_for_scenario(
+            self.name,
+            self.agent_roles,
+            [
             Persona(
                 agent_id="agent_customer",
                 role="Customer",
@@ -127,7 +129,8 @@ class CustomerComplaintScenario(Scenario[CustomerComplaintSimulationRequest]):
                 goal="形成最终处理结论，并明确下一步负责人和时限",
                 tolerance="中",
             ),
-        ]
+            ],
+        )
 
     def detect_complaint_signals(
         self,
@@ -349,4 +352,3 @@ Agent Persona：
 
 
 customer_complaint_scenario = CustomerComplaintScenario()
-

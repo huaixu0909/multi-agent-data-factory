@@ -4,10 +4,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.core.database import select_personas_for_scenario
 from app.core.llm import LLMGenerationResult, build_deepseek_client
 from app.core.models import ConversationRecord, Message, Persona
 from app.core.scenario import Scenario
-from app.core.scoring import score_conversation_quality
+from app.core.workflow import run_langgraph_simulation
 
 
 InterviewDifficulty = Literal["low", "medium", "high"]
@@ -47,28 +48,16 @@ class TechnicalInterviewScenario(Scenario[TechnicalInterviewSimulationRequest]):
     def simulate(self, request: TechnicalInterviewSimulationRequest) -> ConversationRecord:
         agents = self.generate_personas(request)
         signals = self.detect_interview_signals(request)
-        generation_mode = "mock"
-        llm_provider: str | None = None
-        llm_model: str | None = None
-        llm_error: str | None = None
-
-        try:
-            llm_result = self.generate_llm_messages(request, agents, signals)
-            messages = self.normalize_llm_messages(llm_result.messages, agents, request.max_turns)
-            generation_mode = "llm"
-            llm_provider = llm_result.provider
-            llm_model = llm_result.model
-        except Exception as error:
-            messages = self.generate_messages(request, agents, signals)
-            llm_error = str(error)[:500]
-
         task_input = request.model_dump()
-        scoring_result = score_conversation_quality(
+        mock_messages = self.generate_messages(request, agents, signals)
+        workflow_result = run_langgraph_simulation(
             scenario=self.name,
+            scenario_instructions=self.agent_node_instructions(),
             task_input=task_input,
             agents=agents,
-            messages=messages,
             issue_hints=[signal.model_dump() for signal in signals],
+            max_turns=request.max_turns,
+            mock_messages=mock_messages,
         )
 
         return ConversationRecord(
@@ -77,23 +66,36 @@ class TechnicalInterviewScenario(Scenario[TechnicalInterviewSimulationRequest]):
             scenario=self.name,
             task_input=task_input,
             agents=agents,
-            messages=messages,
-            scores=scoring_result.scores,
-            accepted=scoring_result.scores.final_score >= 7.0,
-            generation_mode=generation_mode,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
-            llm_error=llm_error,
-            scoring_mode=scoring_result.mode,
-            scoring_provider=scoring_result.provider,
-            scoring_model=scoring_result.model,
-            scoring_error=scoring_result.error,
-            score_feedback=scoring_result.feedback or [],
+            messages=workflow_result.messages,
+            scores=workflow_result.scores,
+            accepted=workflow_result.accepted,
+            generation_mode=workflow_result.generation_mode,
+            llm_provider=workflow_result.llm_provider,
+            llm_model=workflow_result.llm_model,
+            llm_error=workflow_result.llm_error,
+            scoring_mode=workflow_result.scoring_mode,
+            scoring_provider=workflow_result.scoring_provider,
+            scoring_model=workflow_result.scoring_model,
+            scoring_error=workflow_result.scoring_error,
+            score_feedback=workflow_result.score_feedback,
+            workflow_engine=workflow_result.workflow_engine,
+            workflow_steps=workflow_result.workflow_steps,
+            agent_trace=workflow_result.agent_trace,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
 
+    def agent_node_instructions(self) -> str:
+        return (
+            "这是技术面试数据合成场景。每个 Agent 节点只能生成自己这一轮的一条中文发言。"
+            "Interviewer 提出结构化问题；Candidate 结合经验回答且保留真实边界；"
+            "FollowupInterviewer 追问失败场景、边界条件和工程细节；Evaluator 给出能力评估。"
+        )
+
     def generate_personas(self, request: TechnicalInterviewSimulationRequest) -> list[Persona]:
-        return [
+        return select_personas_for_scenario(
+            self.name,
+            self.agent_roles,
+            [
             Persona(
                 agent_id="agent_interviewer",
                 role="Interviewer",
@@ -130,7 +132,8 @@ class TechnicalInterviewScenario(Scenario[TechnicalInterviewSimulationRequest]):
                 goal="总结候选人的优势、短板和是否进入下一轮",
                 tolerance="高",
             ),
-        ]
+            ],
+        )
 
     def detect_interview_signals(
         self,
@@ -338,4 +341,3 @@ Agent Persona：
 
 
 technical_interview_scenario = TechnicalInterviewScenario()
-

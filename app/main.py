@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.conversations import router as conversations_router
 from app.api.datasets import router as datasets_router
+from app.api.personas import router as personas_router
 from app.api.scenarios import router as scenarios_router
 from app.api.simulations import router as simulations_router
 from app.core.config import APP_VERSION
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     application.include_router(simulations_router)
     application.include_router(conversations_router)
     application.include_router(datasets_router)
+    application.include_router(personas_router)
 
     @application.on_event("startup")
     def on_startup() -> None:
