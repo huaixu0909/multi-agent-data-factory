@@ -5,7 +5,7 @@ import sqlite3
 from fastapi import HTTPException
 
 from app.core.config import DATA_DIR, DATABASE_FILE
-from app.core.models import ConversationRecord, Message, Persona, PersonaRecord, QualityScores
+from app.core.models import BatchJobRecord, ConversationRecord, Message, Persona, PersonaRecord, QualityScores
 
 
 DEFAULT_PERSONAS = [
@@ -150,7 +150,7 @@ def ensure_data_dirs() -> None:
 
 
 def open_database() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE_FILE)
+    connection = sqlite3.connect(DATABASE_FILE, timeout=30)
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -205,8 +205,31 @@ def initialize_database() -> None:
                 success_count INTEGER NOT NULL DEFAULT 0,
                 weight REAL NOT NULL DEFAULT 1,
                 memory_notes TEXT NOT NULL DEFAULT '[]',
+                success_patterns TEXT NOT NULL DEFAULT '[]',
+                failure_patterns TEXT NOT NULL DEFAULT '[]',
+                strategy_notes TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS batch_jobs (
+                job_id TEXT PRIMARY KEY,
+                scenario TEXT NOT NULL,
+                status TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                failed INTEGER NOT NULL DEFAULT 0,
+                min_score REAL NOT NULL DEFAULT 0,
+                payload TEXT NOT NULL DEFAULT '{}',
+                conversation_ids TEXT NOT NULL DEFAULT '[]',
+                error TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT
             )
             """
         )
@@ -227,6 +250,9 @@ def initialize_database() -> None:
         _ensure_column(connection, "conversations", "workflow_engine", "TEXT NOT NULL DEFAULT 'legacy'")
         _ensure_column(connection, "conversations", "workflow_steps", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "conversations", "agent_trace", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "personas", "success_patterns", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "personas", "failure_patterns", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "personas", "strategy_notes", "TEXT NOT NULL DEFAULT '[]'")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_conversations_created_at ON conversations(created_at DESC)"
         )
@@ -235,6 +261,12 @@ def initialize_database() -> None:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_personas_scenario_role ON personas(scenario, role)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_batch_jobs_created_at ON batch_jobs(created_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_batch_jobs_status ON batch_jobs(status)"
         )
         seed_default_personas(connection)
         connection.commit()
@@ -257,9 +289,9 @@ def seed_default_personas(connection: sqlite3.Connection) -> None:
             INSERT OR IGNORE INTO personas (
                 persona_id, scenario, role, name, personality, style, focus, goal,
                 tolerance, usage_count, average_score, success_count, weight,
-                memory_notes, created_at, updated_at
+                memory_notes, success_patterns, failure_patterns, strategy_notes, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 1, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 1, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["persona_id"],
@@ -272,6 +304,9 @@ def seed_default_personas(connection: sqlite3.Connection) -> None:
                 item["goal"],
                 item["tolerance"],
                 json.dumps(["默认 Persona，等待真实对话积累表现记忆。"], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
                 now,
                 now,
             ),
@@ -282,6 +317,18 @@ def _utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _json_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(str(value or "[]"))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(item) for item in parsed if str(item).strip()]
 
 
 def conversation_to_row(conversation: ConversationRecord) -> tuple:
@@ -375,7 +422,10 @@ def row_to_persona(row: sqlite3.Row) -> PersonaRecord:
         average_score=round(float(row["average_score"]), 2),
         success_count=int(row["success_count"]),
         weight=round(float(row["weight"]), 3),
-        memory_notes=json.loads(str(row["memory_notes"] or "[]")),
+        memory_notes=_json_list(row["memory_notes"]),
+        success_patterns=_json_list(row["success_patterns"]),
+        failure_patterns=_json_list(row["failure_patterns"]),
+        strategy_notes=_json_list(row["strategy_notes"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
@@ -392,6 +442,10 @@ def persona_record_to_agent(persona: PersonaRecord) -> Persona:
         focus=persona.focus,
         goal=persona.goal,
         tolerance=persona.tolerance,
+        memory_notes=persona.memory_notes,
+        success_patterns=persona.success_patterns,
+        failure_patterns=persona.failure_patterns,
+        strategy_notes=persona.strategy_notes,
     )
 
 
@@ -403,7 +457,7 @@ def list_personas(scenario: str | None = None) -> list[PersonaRecord]:
                 """
                 SELECT persona_id, scenario, role, name, personality, style, focus, goal,
                        tolerance, usage_count, average_score, success_count, weight,
-                       memory_notes, created_at, updated_at
+                       memory_notes, success_patterns, failure_patterns, strategy_notes, created_at, updated_at
                 FROM personas
                 WHERE scenario = ?
                 ORDER BY scenario, role, weight DESC, average_score DESC, usage_count DESC
@@ -415,7 +469,7 @@ def list_personas(scenario: str | None = None) -> list[PersonaRecord]:
                 """
                 SELECT persona_id, scenario, role, name, personality, style, focus, goal,
                        tolerance, usage_count, average_score, success_count, weight,
-                       memory_notes, created_at, updated_at
+                       memory_notes, success_patterns, failure_patterns, strategy_notes, created_at, updated_at
                 FROM personas
                 ORDER BY scenario, role, weight DESC, average_score DESC, usage_count DESC
                 """
@@ -447,6 +501,7 @@ def update_persona_memory(conversation: ConversationRecord) -> None:
     note = _build_persona_memory_note(conversation)
     now = _utc_now()
     persona_ids = [agent.persona_id for agent in conversation.agents if agent.persona_id]
+    persona_roles = {agent.persona_id: agent.role for agent in conversation.agents if agent.persona_id}
     if not persona_ids:
         return
 
@@ -454,7 +509,8 @@ def update_persona_memory(conversation: ConversationRecord) -> None:
         for persona_id in persona_ids:
             row = connection.execute(
                 """
-                SELECT usage_count, average_score, success_count, weight, memory_notes
+                SELECT usage_count, average_score, success_count, weight,
+                       memory_notes, success_patterns, failure_patterns, strategy_notes
                 FROM personas
                 WHERE persona_id = ?
                 """,
@@ -471,8 +527,18 @@ def update_persona_memory(conversation: ConversationRecord) -> None:
             new_success_count = success_count + success_delta
             next_weight = weight + (0.08 if conversation.accepted else -0.05)
             next_weight = max(0.3, min(2.5, next_weight))
-            memory_notes = json.loads(str(row["memory_notes"] or "[]"))
+            role = persona_roles.get(persona_id, "")
+            memory_payload = _build_persona_memory_payload(conversation, role)
+            memory_notes = _json_list(row["memory_notes"])
             memory_notes = ([note] + memory_notes)[:8]
+            success_patterns = _json_list(row["success_patterns"])
+            failure_patterns = _json_list(row["failure_patterns"])
+            strategy_notes = _json_list(row["strategy_notes"])
+            if conversation.accepted:
+                success_patterns = ([memory_payload["pattern"]] + success_patterns)[:6]
+            else:
+                failure_patterns = ([memory_payload["pattern"]] + failure_patterns)[:6]
+            strategy_notes = ([memory_payload["strategy"]] + strategy_notes)[:6]
             connection.execute(
                 """
                 UPDATE personas
@@ -481,6 +547,9 @@ def update_persona_memory(conversation: ConversationRecord) -> None:
                     success_count = ?,
                     weight = ?,
                     memory_notes = ?,
+                    success_patterns = ?,
+                    failure_patterns = ?,
+                    strategy_notes = ?,
                     updated_at = ?
                 WHERE persona_id = ?
                 """,
@@ -490,6 +559,9 @@ def update_persona_memory(conversation: ConversationRecord) -> None:
                     new_success_count,
                     round(next_weight, 4),
                     json.dumps(memory_notes, ensure_ascii=False),
+                    json.dumps(success_patterns, ensure_ascii=False),
+                    json.dumps(failure_patterns, ensure_ascii=False),
+                    json.dumps(strategy_notes, ensure_ascii=False),
                     now,
                     persona_id,
                 ),
@@ -506,6 +578,35 @@ def _build_persona_memory_note(conversation: ConversationRecord) -> str:
     status = "高质量样本" if conversation.accepted else "待改进样本"
     feedback = "；".join(conversation.score_feedback[:2]) if conversation.score_feedback else "暂无 LLM 评语"
     return f"{scenario_label} / {status} / 分数 {conversation.scores.final_score:.2f}：{feedback}"
+
+
+def _build_persona_memory_payload(conversation: ConversationRecord, role: str) -> dict[str, str]:
+    role_messages = [message.content for message in conversation.messages if message.role == role]
+    last_role_message = role_messages[-1] if role_messages else "本轮没有直接发言，需要关注路由是否合理。"
+    feedback = conversation.score_feedback[0] if conversation.score_feedback else "暂无评分反馈"
+    route_roles = ", ".join(
+        sorted({str(item.get("role", "")).strip() for item in conversation.agent_trace if item.get("role")})
+    )
+    if not route_roles:
+        route_roles = "当前场景"
+
+    score_text = f"{conversation.scores.final_score:.2f}"
+    pattern_prefix = "高质量经验" if conversation.accepted else "低分风险"
+    strategy_prefix = "下次优先保持" if conversation.accepted else "下次优先修正"
+    compact_message = _compact_text(last_role_message, 88)
+    compact_feedback = _compact_text(feedback, 88)
+
+    return {
+        "pattern": f"{pattern_prefix}：{role or 'Agent'} 在 {conversation.scenario} 中参与 {route_roles} 路径；样本分 {score_text}；代表发言：{compact_message}",
+        "strategy": f"{strategy_prefix}：结合评分反馈调整表达。反馈：{compact_feedback}",
+    }
+
+
+def _compact_text(value: str, max_length: int) -> str:
+    normalized = " ".join(str(value).split())
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[:max_length]}..."
 
 
 def save_conversation(conversation: ConversationRecord) -> None:
@@ -633,3 +734,130 @@ def find_conversation(conversation_id: str) -> ConversationRecord:
     if row is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return row_to_conversation(row)
+
+
+def save_batch_job(job: BatchJobRecord) -> None:
+    ensure_data_dirs()
+    with open_database() as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO batch_jobs (
+                job_id, scenario, status, total, completed, accepted, failed,
+                min_score, payload, conversation_ids, error,
+                created_at, started_at, finished_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.job_id,
+                job.scenario,
+                job.status,
+                job.total,
+                job.completed,
+                job.accepted,
+                job.failed,
+                job.min_score,
+                json.dumps(job.payload, ensure_ascii=False),
+                json.dumps(job.conversation_ids, ensure_ascii=False),
+                job.error,
+                job.created_at,
+                job.started_at,
+                job.finished_at,
+            ),
+        )
+        connection.commit()
+
+
+def update_batch_job(job_id: str, **updates: object) -> BatchJobRecord:
+    ensure_data_dirs()
+    if not updates:
+        return find_batch_job(job_id)
+
+    allowed = {
+        "status",
+        "completed",
+        "accepted",
+        "failed",
+        "conversation_ids",
+        "error",
+        "started_at",
+        "finished_at",
+    }
+    assignments: list[str] = []
+    values: list[object] = []
+    for key, value in updates.items():
+        if key not in allowed:
+            continue
+        assignments.append(f"{key} = ?")
+        if key == "conversation_ids":
+            values.append(json.dumps(value or [], ensure_ascii=False))
+        else:
+            values.append(value)
+
+    if not assignments:
+        return find_batch_job(job_id)
+
+    values.append(job_id)
+    with open_database() as connection:
+        connection.execute(
+            f"UPDATE batch_jobs SET {', '.join(assignments)} WHERE job_id = ?",
+            values,
+        )
+        connection.commit()
+    return find_batch_job(job_id)
+
+
+def list_batch_jobs(limit: int = 20) -> list[BatchJobRecord]:
+    ensure_data_dirs()
+    limit = max(1, min(limit, 100))
+    with open_database() as connection:
+        rows = connection.execute(
+            """
+            SELECT job_id, scenario, status, total, completed, accepted, failed,
+                   min_score, payload, conversation_ids, error,
+                   created_at, started_at, finished_at
+            FROM batch_jobs
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [row_to_batch_job(row) for row in rows]
+
+
+def find_batch_job(job_id: str) -> BatchJobRecord:
+    ensure_data_dirs()
+    with open_database() as connection:
+        row = connection.execute(
+            """
+            SELECT job_id, scenario, status, total, completed, accepted, failed,
+                   min_score, payload, conversation_ids, error,
+                   created_at, started_at, finished_at
+            FROM batch_jobs
+            WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Batch job not found")
+    return row_to_batch_job(row)
+
+
+def row_to_batch_job(row: sqlite3.Row) -> BatchJobRecord:
+    return BatchJobRecord(
+        job_id=str(row["job_id"]),
+        scenario=str(row["scenario"]),
+        status=str(row["status"]),
+        total=int(row["total"]),
+        completed=int(row["completed"]),
+        accepted=int(row["accepted"]),
+        failed=int(row["failed"]),
+        min_score=float(row["min_score"]),
+        payload=json.loads(str(row["payload"] or "{}")),
+        conversation_ids=_json_list(row["conversation_ids"]),
+        error=str(row["error"]) if row["error"] is not None else None,
+        created_at=str(row["created_at"]),
+        started_at=str(row["started_at"]) if row["started_at"] is not None else None,
+        finished_at=str(row["finished_at"]) if row["finished_at"] is not None else None,
+    )

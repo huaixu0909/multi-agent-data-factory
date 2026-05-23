@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.conversations import router as conversations_router
 from app.api.datasets import router as datasets_router
+from app.api.jobs import router as jobs_router
 from app.api.personas import router as personas_router
 from app.api.scenarios import router as scenarios_router
 from app.api.simulations import router as simulations_router
@@ -44,6 +45,7 @@ def create_app() -> FastAPI:
     application.include_router(conversations_router)
     application.include_router(datasets_router)
     application.include_router(personas_router)
+    application.include_router(jobs_router)
 
     @application.on_event("startup")
     def on_startup() -> None:
@@ -58,6 +60,7 @@ def create_app() -> FastAPI:
             "docs": "http://localhost:8001/docs",
             "health": "http://localhost:8001/health",
             "scenarios": "http://localhost:8001/api/scenarios",
+            "jobs": "http://localhost:8001/api/jobs",
         }
 
     @application.get("/health", response_model=HealthResponse)

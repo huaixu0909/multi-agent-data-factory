@@ -63,6 +63,23 @@ class AgentRunner:
 发言要符合你的 Persona、目标和容忍度，并且要承接已有对话历史。
 """.strip()
 
+    def _format_agent_memory(self, agent: Persona) -> str:
+        sections = [
+            ("最近样本记忆", agent.memory_notes[:3]),
+            ("成功经验", agent.success_patterns[:3]),
+            ("失败教训", agent.failure_patterns[:3]),
+            ("策略建议", agent.strategy_notes[:3]),
+        ]
+        lines: list[str] = []
+        for title, items in sections:
+            if not items:
+                lines.append(f"- {title}: 暂无")
+                continue
+            lines.append(f"- {title}:")
+            for item in items:
+                lines.append(f"  - {item}")
+        return "\n".join(lines)
+
     def _build_user_prompt(
         self,
         *,
@@ -95,6 +112,9 @@ class AgentRunner:
 - goal: {agent.goal}
 - tolerance: {agent.tolerance}
 
+Agent 长期记忆（必须参考，但不要逐字复述）：
+{self._format_agent_memory(agent)}
+
 任务输入：
 {json.dumps(task_input, ensure_ascii=False, indent=2)}
 
@@ -107,3 +127,4 @@ class AgentRunner:
 现在是第 {turn_number} / {max_turns} 轮。
 请只生成 {agent.role} 这一轮的一条中文发言。
 """.strip()
+ 
