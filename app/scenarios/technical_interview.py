@@ -78,6 +78,7 @@ class TechnicalInterviewScenario(Scenario[TechnicalInterviewSimulationRequest]):
             scoring_model=workflow_result.scoring_model,
             scoring_error=workflow_result.scoring_error,
             score_feedback=workflow_result.score_feedback,
+            quality_report=workflow_result.quality_report,
             workflow_engine=workflow_result.workflow_engine,
             workflow_steps=workflow_result.workflow_steps,
             agent_trace=workflow_result.agent_trace,

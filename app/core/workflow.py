@@ -4,7 +4,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.core.agents import AgentRunner
-from app.core.models import Message, Persona, QualityScores
+from app.core.models import Message, Persona, QualityReport, QualityScores
 from app.core.scoring import QualityScoringResult, score_conversation_quality
 
 
@@ -47,6 +47,7 @@ class SimulationWorkflowResult:
     scoring_model: str | None
     scoring_error: str | None
     score_feedback: list[str]
+    quality_report: QualityReport
     workflow_engine: str
     workflow_steps: list[str]
     agent_trace: list[dict[str, Any]]
@@ -232,6 +233,7 @@ def run_langgraph_simulation(
         scoring_model=scoring_result.model,
         scoring_error=scoring_result.error,
         score_feedback=scoring_result.feedback or [],
+        quality_report=scoring_result.report or QualityReport(),
         workflow_engine="langgraph_memory_agents",
         workflow_steps=final_state.get("workflow_steps", []),
         agent_trace=final_state.get("agent_trace", []),

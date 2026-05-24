@@ -1,11 +1,24 @@
+import hashlib
 import json
 import math
+import re
 import sqlite3
+import uuid
 
 from fastapi import HTTPException
 
 from app.core.config import DATA_DIR, DATABASE_FILE
-from app.core.models import BatchJobRecord, ConversationRecord, Message, Persona, PersonaRecord, QualityScores
+from app.core.models import (
+    BatchJobRecord,
+    ConversationRecord,
+    DatasetVersionRecord,
+    DiversityReport,
+    Message,
+    Persona,
+    PersonaRecord,
+    QualityReport,
+    QualityScores,
+)
 
 
 DEFAULT_PERSONAS = [
@@ -181,6 +194,11 @@ def initialize_database() -> None:
                 scoring_model TEXT,
                 scoring_error TEXT,
                 score_feedback TEXT NOT NULL DEFAULT '[]',
+                quality_report TEXT NOT NULL DEFAULT '{}',
+                content_hash TEXT,
+                duplicate_of TEXT,
+                similarity_score REAL NOT NULL DEFAULT 0,
+                diversity_report TEXT NOT NULL DEFAULT '{}',
                 workflow_engine TEXT NOT NULL DEFAULT 'legacy',
                 workflow_steps TEXT NOT NULL DEFAULT '[]',
                 agent_trace TEXT NOT NULL DEFAULT '[]',
@@ -233,6 +251,24 @@ def initialize_database() -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dataset_versions (
+                version_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                filters TEXT NOT NULL DEFAULT '{}',
+                conversation_ids TEXT NOT NULL DEFAULT '[]',
+                total INTEGER NOT NULL DEFAULT 0,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                average_score REAL NOT NULL DEFAULT 0,
+                duplicate_count INTEGER NOT NULL DEFAULT 0,
+                duplicate_rate REAL NOT NULL DEFAULT 0,
+                diversity_score REAL NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         _ensure_column(connection, "conversations", "scenario", "TEXT NOT NULL DEFAULT 'code_review'")
         _ensure_column(connection, "conversations", "task_input", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(connection, "conversations", "language", "TEXT")
@@ -247,9 +283,17 @@ def initialize_database() -> None:
         _ensure_column(connection, "conversations", "scoring_model", "TEXT")
         _ensure_column(connection, "conversations", "scoring_error", "TEXT")
         _ensure_column(connection, "conversations", "score_feedback", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "conversations", "quality_report", "TEXT NOT NULL DEFAULT '{}'")
+        _ensure_column(connection, "conversations", "content_hash", "TEXT")
+        _ensure_column(connection, "conversations", "duplicate_of", "TEXT")
+        _ensure_column(connection, "conversations", "similarity_score", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(connection, "conversations", "diversity_report", "TEXT NOT NULL DEFAULT '{}'")
         _ensure_column(connection, "conversations", "workflow_engine", "TEXT NOT NULL DEFAULT 'legacy'")
         _ensure_column(connection, "conversations", "workflow_steps", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "conversations", "agent_trace", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(connection, "dataset_versions", "duplicate_count", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(connection, "dataset_versions", "duplicate_rate", "REAL NOT NULL DEFAULT 0")
+        _ensure_column(connection, "dataset_versions", "diversity_score", "REAL NOT NULL DEFAULT 1")
         _ensure_column(connection, "personas", "success_patterns", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "personas", "failure_patterns", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(connection, "personas", "strategy_notes", "TEXT NOT NULL DEFAULT '[]'")
@@ -260,6 +304,9 @@ def initialize_database() -> None:
             "CREATE INDEX IF NOT EXISTS idx_conversations_scenario ON conversations(scenario)"
         )
         connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_content_hash ON conversations(content_hash)"
+        )
+        connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_personas_scenario_role ON personas(scenario, role)"
         )
         connection.execute(
@@ -267,6 +314,9 @@ def initialize_database() -> None:
         )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_batch_jobs_status ON batch_jobs(status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_dataset_versions_created_at ON dataset_versions(created_at DESC)"
         )
         seed_default_personas(connection)
         connection.commit()
@@ -353,6 +403,11 @@ def conversation_to_row(conversation: ConversationRecord) -> tuple:
         conversation.scoring_model,
         conversation.scoring_error,
         json.dumps(conversation.score_feedback, ensure_ascii=False),
+        json.dumps(conversation.quality_report.model_dump(), ensure_ascii=False),
+        conversation.content_hash,
+        conversation.duplicate_of,
+        conversation.similarity_score,
+        json.dumps(conversation.diversity_report.model_dump(), ensure_ascii=False),
         conversation.workflow_engine,
         json.dumps(conversation.workflow_steps, ensure_ascii=False),
         json.dumps(conversation.agent_trace, ensure_ascii=False),
@@ -375,6 +430,11 @@ def row_to_conversation(row: sqlite3.Row) -> ConversationRecord:
     scoring_model = row["scoring_model"] if "scoring_model" in row.keys() else None
     scoring_error = row["scoring_error"] if "scoring_error" in row.keys() else None
     score_feedback_raw = row["score_feedback"] if "score_feedback" in row.keys() else "[]"
+    quality_report_raw = row["quality_report"] if "quality_report" in row.keys() else "{}"
+    content_hash = row["content_hash"] if "content_hash" in row.keys() else None
+    duplicate_of = row["duplicate_of"] if "duplicate_of" in row.keys() else None
+    similarity_score = row["similarity_score"] if "similarity_score" in row.keys() else 0
+    diversity_report_raw = row["diversity_report"] if "diversity_report" in row.keys() else "{}"
     workflow_engine = row["workflow_engine"] if "workflow_engine" in row.keys() else "legacy"
     workflow_steps_raw = row["workflow_steps"] if "workflow_steps" in row.keys() else "[]"
     agent_trace_raw = row["agent_trace"] if "agent_trace" in row.keys() else "[]"
@@ -400,6 +460,11 @@ def row_to_conversation(row: sqlite3.Row) -> ConversationRecord:
         scoring_model=str(scoring_model) if scoring_model is not None else None,
         scoring_error=str(scoring_error) if scoring_error is not None else None,
         score_feedback=json.loads(str(score_feedback_raw or "[]")),
+        quality_report=QualityReport(**json.loads(str(quality_report_raw or "{}"))),
+        content_hash=str(content_hash) if content_hash is not None else None,
+        duplicate_of=str(duplicate_of) if duplicate_of is not None else None,
+        similarity_score=float(similarity_score or 0),
+        diversity_report=DiversityReport(**json.loads(str(diversity_report_raw or "{}"))),
         workflow_engine=str(workflow_engine or "legacy"),
         workflow_steps=json.loads(str(workflow_steps_raw or "[]")),
         agent_trace=json.loads(str(agent_trace_raw or "[]")),
@@ -609,8 +674,151 @@ def _compact_text(value: str, max_length: int) -> str:
     return f"{normalized[:max_length]}..."
 
 
+def enrich_conversation_diversity(conversation: ConversationRecord) -> ConversationRecord:
+    corpus = _conversation_diversity_corpus(conversation)
+    content_hash = _stable_content_hash(corpus)
+    candidate_shingles = _text_shingles(corpus)
+
+    duplicate_level = "unique"
+    duplicate_of: str | None = None
+    best_similarity = 0.0
+    signals = [f"content_hash:{content_hash}"]
+
+    with open_database() as connection:
+        rows = connection.execute(
+            """
+            SELECT conversation_id, content_hash, messages, task_input
+            FROM conversations
+            WHERE scenario = ? AND conversation_id != ?
+            ORDER BY created_at DESC
+            LIMIT 500
+            """,
+            (conversation.scenario, conversation.conversation_id),
+        ).fetchall()
+
+    for row in rows:
+        row_hash = str(row["content_hash"] or "")
+        row_id = str(row["conversation_id"])
+        if row_hash and row_hash == content_hash:
+            duplicate_level = "exact_duplicate"
+            duplicate_of = row_id
+            best_similarity = 1.0
+            signals.append("exact content hash match")
+            break
+
+        existing_corpus = _stored_conversation_corpus(row)
+        similarity = _jaccard_similarity(candidate_shingles, _text_shingles(existing_corpus))
+        if similarity > best_similarity:
+            best_similarity = similarity
+            duplicate_of = row_id if similarity >= 0.82 else None
+
+    if duplicate_level != "exact_duplicate":
+        if best_similarity >= 0.88:
+            duplicate_level = "near_duplicate"
+            signals.append("high shingle overlap")
+        else:
+            duplicate_level = "unique"
+            duplicate_of = None
+            signals.append("no strong overlap in recent same-scenario corpus")
+
+    recommendation = {
+        "exact_duplicate": "Exact duplicate detected. Exclude it from high-quality dataset exports or regenerate with a different task/persona seed.",
+        "near_duplicate": "Near duplicate detected. Keep only if it adds a new conflict angle, otherwise regenerate with stronger persona or task variation.",
+        "unique": "Unique enough for the current local corpus.",
+    }[duplicate_level]
+
+    similarity_score = round(best_similarity, 4)
+    report = DiversityReport(
+        content_hash=content_hash,
+        duplicate_level=duplicate_level,
+        duplicate_of=duplicate_of,
+        similarity_score=similarity_score,
+        uniqueness_score=round(1 - similarity_score, 4),
+        recommendation=recommendation,
+        signals=signals,
+    )
+    conversation.content_hash = content_hash
+    conversation.duplicate_of = duplicate_of
+    conversation.similarity_score = similarity_score
+    conversation.diversity_report = report
+    return conversation
+
+
+def _conversation_diversity_corpus(conversation: ConversationRecord) -> str:
+    parts = [
+        conversation.scenario,
+        json.dumps(conversation.task_input, ensure_ascii=False, sort_keys=True),
+        conversation.code_diff or "",
+        " ".join(conversation.review_focus),
+    ]
+    parts.extend(f"{message.role}: {message.content}" for message in conversation.messages)
+    return "\n".join(parts)
+
+
+def _stored_conversation_corpus(row: sqlite3.Row) -> str:
+    try:
+        messages = json.loads(str(row["messages"] or "[]"))
+    except json.JSONDecodeError:
+        messages = []
+    try:
+        task_input = json.loads(str(row["task_input"] or "{}"))
+    except json.JSONDecodeError:
+        task_input = {}
+    parts = [json.dumps(task_input, ensure_ascii=False, sort_keys=True)]
+    parts.extend(
+        f"{str(item.get('role', ''))}: {str(item.get('content', ''))}"
+        for item in messages
+        if isinstance(item, dict)
+    )
+    return "\n".join(parts)
+
+
+def _stable_content_hash(text: str) -> str:
+    normalized = _normalize_for_similarity(text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+
+
+def _normalize_for_similarity(text: str) -> str:
+    lowered = str(text or "").lower()
+    compact = re.sub(r"\s+", " ", lowered)
+    return compact.strip()
+
+
+def _text_shingles(text: str, size: int = 5) -> set[str]:
+    normalized = _normalize_for_similarity(text)
+    if not normalized:
+        return set()
+    tokens = re.findall(r"\w+", normalized)
+    token_text = " ".join(tokens) if len(tokens) >= 8 else normalized
+    if len(token_text) <= size:
+        return {token_text}
+    return {token_text[index : index + size] for index in range(len(token_text) - size + 1)}
+
+
+def _jaccard_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def _calculate_diversity_stats(conversations: list[ConversationRecord]) -> tuple[int, float, float]:
+    total = len(conversations)
+    if not total:
+        return 0, 0.0, 1.0
+    duplicate_count = sum(
+        1
+        for conversation in conversations
+        if conversation.duplicate_of
+        or conversation.similarity_score >= 0.88
+        or conversation.diversity_report.duplicate_level in {"exact_duplicate", "near_duplicate"}
+    )
+    duplicate_rate = duplicate_count / total
+    return duplicate_count, round(duplicate_rate, 4), round(1 - duplicate_rate, 4)
+
+
 def save_conversation(conversation: ConversationRecord) -> None:
     ensure_data_dirs()
+    conversation = enrich_conversation_diversity(conversation)
     with open_database() as connection:
         connection.execute(
             """
@@ -619,10 +827,11 @@ def save_conversation(conversation: ConversationRecord) -> None:
                 review_focus, agents, messages, scores, accepted,
                 generation_mode, llm_provider, llm_model, llm_error,
                 scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
                 workflow_engine, workflow_steps, agent_trace,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             conversation_to_row(conversation),
         )
@@ -639,6 +848,7 @@ def load_conversations(scenario: str | None = None) -> list[ConversationRecord]:
                        review_focus, agents, messages, scores, accepted,
                        generation_mode, llm_provider, llm_model, llm_error,
                        scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                       quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
                        workflow_engine, workflow_steps, agent_trace,
                        created_at
                 FROM conversations
@@ -654,6 +864,7 @@ def load_conversations(scenario: str | None = None) -> list[ConversationRecord]:
                        review_focus, agents, messages, scores, accepted,
                        generation_mode, llm_provider, llm_model, llm_error,
                        scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                       quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
                        workflow_engine, workflow_steps, agent_trace,
                        created_at
                 FROM conversations
@@ -697,6 +908,33 @@ def query_conversations(
     return filtered[start : start + page_size], total, total_pages
 
 
+def query_all_conversations(
+    *,
+    scenario: str | None = None,
+    accepted: bool | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
+    q: str | None = None,
+) -> list[ConversationRecord]:
+    page = 1
+    items: list[ConversationRecord] = []
+    while True:
+        conversations, _, total_pages = query_conversations(
+            scenario=scenario,
+            accepted=accepted,
+            min_score=min_score,
+            max_score=max_score,
+            q=q,
+            page=page,
+            page_size=100,
+        )
+        items.extend(conversations)
+        if page >= total_pages:
+            break
+        page += 1
+    return items
+
+
 def _conversation_search_text(conversation: ConversationRecord) -> str:
     parts = [
         conversation.conversation_id,
@@ -723,6 +961,7 @@ def find_conversation(conversation_id: str) -> ConversationRecord:
                    review_focus, agents, messages, scores, accepted,
                    generation_mode, llm_provider, llm_model, llm_error,
                    scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+                   quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
                    workflow_engine, workflow_steps, agent_trace,
                    created_at
             FROM conversations
@@ -734,6 +973,87 @@ def find_conversation(conversation_id: str) -> ConversationRecord:
     if row is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return row_to_conversation(row)
+
+
+def find_conversation_silent(conversation_id: str) -> ConversationRecord | None:
+    try:
+        return find_conversation(conversation_id)
+    except HTTPException:
+        return None
+
+
+def delete_conversation(conversation_id: str) -> None:
+    ensure_data_dirs()
+    with open_database() as connection:
+        row = connection.execute(
+            "SELECT conversation_id FROM conversations WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+        connection.execute(
+            "DELETE FROM conversations WHERE conversation_id = ?",
+            (conversation_id,),
+        )
+
+        job_rows = connection.execute(
+            """
+            SELECT job_id, conversation_ids
+            FROM batch_jobs
+            WHERE conversation_ids LIKE ?
+            """,
+            (f"%{conversation_id}%",),
+        ).fetchall()
+        for job_row in job_rows:
+            conversation_ids = [
+                item for item in _json_list(job_row["conversation_ids"]) if item != conversation_id
+            ]
+            connection.execute(
+                "UPDATE batch_jobs SET conversation_ids = ? WHERE job_id = ?",
+                (json.dumps(conversation_ids, ensure_ascii=False), job_row["job_id"]),
+            )
+
+        version_rows = connection.execute(
+            """
+            SELECT version_id, conversation_ids
+            FROM dataset_versions
+            WHERE conversation_ids LIKE ?
+            """,
+            (f"%{conversation_id}%",),
+        ).fetchall()
+        for version_row in version_rows:
+            conversation_ids = [
+                item for item in _json_list(version_row["conversation_ids"]) if item != conversation_id
+            ]
+            conversations = [find_conversation_silent(item) for item in conversation_ids]
+            conversations = [item for item in conversations if item is not None]
+            total = len(conversations)
+            accepted_count = sum(1 for item in conversations if item.accepted)
+            average_score = (
+                sum(item.scores.final_score for item in conversations) / total if total else 0
+            )
+            duplicate_count, duplicate_rate, diversity_score = _calculate_diversity_stats(conversations)
+            connection.execute(
+                """
+                UPDATE dataset_versions
+                SET conversation_ids = ?, total = ?, accepted = ?, average_score = ?,
+                    duplicate_count = ?, duplicate_rate = ?, diversity_score = ?
+                WHERE version_id = ?
+                """,
+                (
+                    json.dumps([item.conversation_id for item in conversations], ensure_ascii=False),
+                    total,
+                    accepted_count,
+                    round(average_score, 4),
+                    duplicate_count,
+                    duplicate_rate,
+                    diversity_score,
+                    version_row["version_id"],
+                ),
+            )
+
+        connection.commit()
 
 
 def save_batch_job(job: BatchJobRecord) -> None:
@@ -860,4 +1180,141 @@ def row_to_batch_job(row: sqlite3.Row) -> BatchJobRecord:
         created_at=str(row["created_at"]),
         started_at=str(row["started_at"]) if row["started_at"] is not None else None,
         finished_at=str(row["finished_at"]) if row["finished_at"] is not None else None,
+    )
+
+
+def create_dataset_version(
+    *,
+    name: str,
+    description: str | None,
+    filters: dict,
+    conversations: list[ConversationRecord],
+) -> DatasetVersionRecord:
+    ensure_data_dirs()
+    version_id = f"ds_{uuid.uuid4().hex[:12]}"
+    conversation_ids = [conversation.conversation_id for conversation in conversations]
+    total = len(conversations)
+    accepted_count = sum(1 for conversation in conversations if conversation.accepted)
+    average_score = (
+        sum(conversation.scores.final_score for conversation in conversations) / total if total else 0
+    )
+    duplicate_count, duplicate_rate, diversity_score = _calculate_diversity_stats(conversations)
+    record = DatasetVersionRecord(
+        version_id=version_id,
+        name=name,
+        description=description,
+        filters=filters,
+        conversation_ids=conversation_ids,
+        total=total,
+        accepted=accepted_count,
+        average_score=round(average_score, 4),
+        duplicate_count=duplicate_count,
+        duplicate_rate=duplicate_rate,
+        diversity_score=diversity_score,
+        created_at=_utc_now(),
+    )
+
+    with open_database() as connection:
+        connection.execute(
+            """
+            INSERT INTO dataset_versions (
+                version_id, name, description, filters, conversation_ids,
+                total, accepted, average_score, duplicate_count, duplicate_rate,
+                diversity_score, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                record.version_id,
+                record.name,
+                record.description,
+                json.dumps(record.filters, ensure_ascii=False),
+                json.dumps(record.conversation_ids, ensure_ascii=False),
+                record.total,
+                record.accepted,
+                record.average_score,
+                record.duplicate_count,
+                record.duplicate_rate,
+                record.diversity_score,
+                record.created_at,
+            ),
+        )
+        connection.commit()
+    return record
+
+
+def list_dataset_versions(limit: int = 20) -> list[DatasetVersionRecord]:
+    ensure_data_dirs()
+    limit = max(1, min(limit, 100))
+    with open_database() as connection:
+        rows = connection.execute(
+            """
+            SELECT version_id, name, description, filters, conversation_ids,
+                   total, accepted, average_score, duplicate_count, duplicate_rate,
+                   diversity_score, created_at
+            FROM dataset_versions
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [row_to_dataset_version(row) for row in rows]
+
+
+def find_dataset_version(version_id: str) -> DatasetVersionRecord:
+    ensure_data_dirs()
+    with open_database() as connection:
+        row = connection.execute(
+            """
+            SELECT version_id, name, description, filters, conversation_ids,
+                   total, accepted, average_score, duplicate_count, duplicate_rate,
+                   diversity_score, created_at
+            FROM dataset_versions
+            WHERE version_id = ?
+            """,
+            (version_id,),
+        ).fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Dataset version not found")
+    return row_to_dataset_version(row)
+
+
+def load_dataset_version_conversations(version_id: str) -> list[ConversationRecord]:
+    version = find_dataset_version(version_id)
+    conversations: list[ConversationRecord] = []
+    for conversation_id in version.conversation_ids:
+        conversation = find_conversation_silent(conversation_id)
+        if conversation is not None:
+            conversations.append(conversation)
+    return conversations
+
+
+def delete_dataset_version(version_id: str) -> None:
+    ensure_data_dirs()
+    with open_database() as connection:
+        row = connection.execute(
+            "SELECT version_id FROM dataset_versions WHERE version_id = ?",
+            (version_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Dataset version not found")
+        connection.execute("DELETE FROM dataset_versions WHERE version_id = ?", (version_id,))
+        connection.commit()
+
+
+def row_to_dataset_version(row: sqlite3.Row) -> DatasetVersionRecord:
+    return DatasetVersionRecord(
+        version_id=str(row["version_id"]),
+        name=str(row["name"]),
+        description=str(row["description"]) if row["description"] is not None else None,
+        filters=json.loads(str(row["filters"] or "{}")),
+        conversation_ids=_json_list(row["conversation_ids"]),
+        total=int(row["total"]),
+        accepted=int(row["accepted"]),
+        average_score=round(float(row["average_score"]), 4),
+        duplicate_count=int(row["duplicate_count"]) if "duplicate_count" in row.keys() else 0,
+        duplicate_rate=round(float(row["duplicate_rate"]), 4) if "duplicate_rate" in row.keys() else 0,
+        diversity_score=round(float(row["diversity_score"]), 4) if "diversity_score" in row.keys() else 1,
+        created_at=str(row["created_at"]),
     )

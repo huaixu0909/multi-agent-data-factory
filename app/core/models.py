@@ -49,6 +49,28 @@ class QualityScores(BaseModel):
     final_score: float = Field(..., ge=0, le=10)
 
 
+class QualityReport(BaseModel):
+    grade: str = "C"
+    decision: str = "review"
+    pass_threshold: float = 7.0
+    judge_votes: list[dict[str, Any]] = Field(default_factory=list)
+    dimension_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    weaknesses: list[str] = Field(default_factory=list)
+    improvement_actions: list[str] = Field(default_factory=list)
+    rejection_reasons: list[str] = Field(default_factory=list)
+
+
+class DiversityReport(BaseModel):
+    content_hash: str = ""
+    duplicate_level: str = "unchecked"
+    duplicate_of: str | None = None
+    similarity_score: float = Field(default=0, ge=0, le=1)
+    uniqueness_score: float = Field(default=1, ge=0, le=1)
+    recommendation: str = ""
+    signals: list[str] = Field(default_factory=list)
+
+
 class ConversationRecord(BaseModel):
     conversation_id: str
     task_type: str
@@ -70,6 +92,11 @@ class ConversationRecord(BaseModel):
     scoring_model: str | None = None
     scoring_error: str | None = None
     score_feedback: list[str] = Field(default_factory=list)
+    quality_report: QualityReport = Field(default_factory=QualityReport)
+    content_hash: str | None = None
+    duplicate_of: str | None = None
+    similarity_score: float = Field(default=0, ge=0, le=1)
+    diversity_report: DiversityReport = Field(default_factory=DiversityReport)
     workflow_engine: str = "legacy"
     workflow_steps: list[str] = Field(default_factory=list)
     agent_trace: list[dict[str, Any]] = Field(default_factory=list)
@@ -151,4 +178,34 @@ class BatchJobRecord(BaseModel):
 
 class BatchJobListResponse(BaseModel):
     items: list[BatchJobRecord]
+    total: int
+
+
+class DatasetVersionCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
+    scenario: str | None = None
+    accepted: bool | None = None
+    min_score: float | None = Field(default=None, ge=0, le=10)
+    max_score: float | None = Field(default=None, ge=0, le=10)
+    q: str | None = None
+
+
+class DatasetVersionRecord(BaseModel):
+    version_id: str
+    name: str
+    description: str | None = None
+    filters: dict[str, Any] = Field(default_factory=dict)
+    conversation_ids: list[str] = Field(default_factory=list)
+    total: int = 0
+    accepted: int = 0
+    average_score: float = 0
+    duplicate_count: int = 0
+    duplicate_rate: float = 0
+    diversity_score: float = 1
+    created_at: str
+
+
+class DatasetVersionListResponse(BaseModel):
+    items: list[DatasetVersionRecord]
     total: int

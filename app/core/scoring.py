@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.llm import build_deepseek_client
-from app.core.models import Message, Persona, QualityScores
+from app.core.models import Message, Persona, QualityReport, QualityScores
 
 
 @dataclass
@@ -14,6 +14,7 @@ class QualityScoringResult:
     model: str | None = None
     error: str | None = None
     feedback: list[str] | None = None
+    report: QualityReport | None = None
 
 
 def score_conversation_quality(
@@ -25,6 +26,14 @@ def score_conversation_quality(
     issue_hints: list[dict[str, Any]],
 ) -> QualityScoringResult:
     heuristic_scores = heuristic_score_conversation(messages, issue_hints)
+    heuristic_report = build_quality_report(
+        scores=heuristic_scores,
+        scenario=scenario,
+        messages=messages,
+        issue_hints=issue_hints,
+        feedback=[],
+        llm_judge_available=False,
+    )
     try:
         return llm_score_conversation(
             scenario=scenario,
@@ -37,12 +46,13 @@ def score_conversation_quality(
     except Exception as error:
         return QualityScoringResult(
             scores=heuristic_scores,
-            mode="heuristic",
+            mode="heuristic_multi_judge",
             error=str(error)[:500],
             feedback=[
                 "使用规则评分器完成评估。",
                 "LLM-as-a-Judge 未启用或调用失败，已自动回退。",
             ],
+            report=heuristic_report,
         )
 
 
@@ -129,10 +139,18 @@ def llm_score_conversation(
 
     return QualityScoringResult(
         scores=scores,
-        mode="llm_judge",
+        mode="enhanced_multi_judge",
         provider=client.provider,
         model=client.model,
         feedback=[str(item).strip() for item in feedback if str(item).strip()][:5],
+        report=build_quality_report(
+            scores=scores,
+            scenario=scenario,
+            messages=messages,
+            issue_hints=issue_hints,
+            feedback=[str(item).strip() for item in feedback if str(item).strip()][:5],
+            llm_judge_available=True,
+        ),
     )
 
 
@@ -262,6 +280,159 @@ def build_quality_scores(
         safety=round(clamp_score(safety), 2),
         final_score=round(clamp_score(final_score), 2),
     )
+
+
+def build_quality_report(
+    *,
+    scores: QualityScores,
+    scenario: str,
+    messages: list[Message],
+    issue_hints: list[dict[str, Any]],
+    feedback: list[str],
+    llm_judge_available: bool,
+) -> QualityReport:
+    diagnostics = build_dimension_diagnostics(scores)
+    weaknesses = [
+        item["reason"]
+        for item in diagnostics
+        if float(item["score"]) < 7.0
+    ][:5]
+    strengths = [
+        item["reason"]
+        for item in diagnostics
+        if float(item["score"]) >= 8.0
+    ][:5]
+    rejection_reasons = build_rejection_reasons(scores, messages, issue_hints, weaknesses)
+    improvement_actions = build_improvement_actions(diagnostics, scenario, issue_hints)
+    votes = build_judge_votes(scores, llm_judge_available)
+    decision = "accept" if scores.final_score >= 7.0 and not rejection_reasons else "reject"
+
+    return QualityReport(
+        grade=quality_grade(scores.final_score),
+        decision=decision,
+        pass_threshold=7.0,
+        judge_votes=votes,
+        dimension_diagnostics=diagnostics,
+        strengths=strengths or feedback[:2],
+        weaknesses=weaknesses,
+        improvement_actions=improvement_actions,
+        rejection_reasons=rejection_reasons,
+    )
+
+
+def build_dimension_diagnostics(scores: QualityScores) -> list[dict[str, Any]]:
+    labels = {
+        "realism": "真实感",
+        "difficulty": "难度",
+        "diversity": "多样性",
+        "consistency": "一致性",
+        "conflict": "冲突强度",
+        "training_value": "训练价值",
+        "safety": "安全性",
+    }
+    values = scores.model_dump()
+    diagnostics: list[dict[str, Any]] = []
+    for key, label in labels.items():
+        score = float(values[key])
+        if score >= 8:
+            level = "strong"
+            reason = f"{label}表现较强，可作为样本优势保留。"
+        elif score >= 7:
+            level = "pass"
+            reason = f"{label}达到可用标准，但仍有优化空间。"
+        elif score >= 5.5:
+            level = "risk"
+            reason = f"{label}偏弱，建议补充更具体的上下文、证据或角色差异。"
+        else:
+            level = "fail"
+            reason = f"{label}不足，当前样本不适合直接进入高质量数据集。"
+        diagnostics.append({"dimension": key, "label": label, "score": round(score, 2), "level": level, "reason": reason})
+    return diagnostics
+
+
+def build_judge_votes(scores: QualityScores, llm_judge_available: bool) -> list[dict[str, Any]]:
+    votes = [
+        {
+            "judge": "structure_judge",
+            "vote": "pass" if scores.consistency >= 7 and scores.diversity >= 6.5 else "reject",
+            "reason": "检查上下文一致性、角色差异和结构完整度。",
+        },
+        {
+            "judge": "training_value_judge",
+            "vote": "pass" if scores.training_value >= 7 and scores.difficulty >= 6.5 else "reject",
+            "reason": "检查样本是否具备训练价值、推理难度和可复用信息密度。",
+        },
+        {
+            "judge": "safety_judge",
+            "vote": "pass" if scores.safety >= 8 else "reject",
+            "reason": "检查安全风险、违规内容和不可控输出。",
+        },
+    ]
+    if llm_judge_available:
+        votes.append(
+            {
+                "judge": "llm_judge",
+                "vote": "pass" if scores.final_score >= 7 else "reject",
+                "reason": "LLM-as-a-Judge 对整体样本质量进行综合判断。",
+            }
+        )
+    return votes
+
+
+def build_rejection_reasons(
+    scores: QualityScores,
+    messages: list[Message],
+    issue_hints: list[dict[str, Any]],
+    weaknesses: list[str],
+) -> list[str]:
+    reasons: list[str] = []
+    if len(messages) < 4:
+        reasons.append("对话轮数过少，缺少足够多轮互动。")
+    if len({message.role for message in messages}) < 2:
+        reasons.append("参与角色过少，无法体现 multi-agent 数据价值。")
+    if issue_hints and scores.consistency < 6.5:
+        reasons.append("对话没有充分承接任务线索或问题证据。")
+    if scores.training_value < 6.5:
+        reasons.append("训练价值不足，信息密度或可学习模式不够。")
+    if scores.safety < 8:
+        reasons.append("安全性未达标。")
+    if scores.final_score < 7:
+        reasons.extend(weaknesses[:2])
+    return list(dict.fromkeys(reasons))[:5]
+
+
+def build_improvement_actions(
+    diagnostics: list[dict[str, Any]],
+    scenario: str,
+    issue_hints: list[dict[str, Any]],
+) -> list[str]:
+    actions: list[str] = []
+    weak_dimensions = {str(item["dimension"]) for item in diagnostics if float(item["score"]) < 7}
+    if "diversity" in weak_dimensions:
+        actions.append("增强不同 Agent 的立场差异、语言风格和目标冲突。")
+    if "consistency" in weak_dimensions:
+        actions.append("要求 Agent 明确引用任务输入、问题线索或前文观点。")
+    if "conflict" in weak_dimensions:
+        actions.append("增加追问、反驳、边界条件和替代方案讨论。")
+    if "training_value" in weak_dimensions:
+        actions.append("补充可执行结论、判断依据和对业务场景有迁移价值的总结。")
+    if issue_hints:
+        actions.append("围绕已识别问题线索生成更具体的证据链和修复/处理方案。")
+    if scenario == "technical_interview":
+        actions.append("让面试官追问失败案例、工程权衡和候选人认知边界。")
+    return list(dict.fromkeys(actions))[:6]
+
+
+def quality_grade(final_score: float) -> str:
+    if final_score >= 9:
+        return "S"
+    if final_score >= 8:
+        return "A"
+    if final_score >= 7:
+        return "B"
+    if final_score >= 6:
+        return "C"
+    return "D"
 
 
 def clamp_score(value: float) -> float:

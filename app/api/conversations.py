@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Query
 
-from app.core.database import find_conversation, query_conversations
+from app.core.database import delete_conversation, find_conversation, query_conversations
 from app.core.models import ConversationListResponse, ConversationRecord
 
 
@@ -38,3 +38,9 @@ def list_conversations(
 @router.get("/{conversation_id}", response_model=ConversationRecord)
 def get_conversation(conversation_id: str) -> ConversationRecord:
     return find_conversation(conversation_id)
+
+
+@router.delete("/{conversation_id}")
+def remove_conversation(conversation_id: str) -> dict[str, str]:
+    delete_conversation(conversation_id)
+    return {"status": "deleted", "conversation_id": conversation_id}
