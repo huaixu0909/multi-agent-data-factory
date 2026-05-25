@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
 
 from app.core.database import (
@@ -18,6 +18,7 @@ from app.core.models import (
     DatasetVersionListResponse,
     DatasetVersionRecord,
 )
+from app.core.security import require_admin
 
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
@@ -50,7 +51,7 @@ def export_dataset_jsonl(
     return "\n".join(rows)
 
 
-@router.post("/versions", response_model=DatasetVersionRecord)
+@router.post("/versions", response_model=DatasetVersionRecord, dependencies=[Depends(require_admin)])
 def create_version(request: DatasetVersionCreateRequest) -> DatasetVersionRecord:
     filters = {
         "scenario": request.scenario,
@@ -86,7 +87,7 @@ def get_version(version_id: str) -> DatasetVersionRecord:
     return find_dataset_version(version_id)
 
 
-@router.delete("/versions/{version_id}")
+@router.delete("/versions/{version_id}", dependencies=[Depends(require_admin)])
 def remove_version(version_id: str) -> dict[str, str]:
     delete_dataset_version(version_id)
     return {"status": "deleted", "version_id": version_id}

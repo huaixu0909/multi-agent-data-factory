@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from app.core.database import delete_conversation, find_conversation, query_conversations
 from app.core.models import ConversationListResponse, ConversationRecord
+from app.core.security import require_admin
 
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -40,7 +41,7 @@ def get_conversation(conversation_id: str) -> ConversationRecord:
     return find_conversation(conversation_id)
 
 
-@router.delete("/{conversation_id}")
+@router.delete("/{conversation_id}", dependencies=[Depends(require_admin)])
 def remove_conversation(conversation_id: str) -> dict[str, str]:
     delete_conversation(conversation_id)
     return {"status": "deleted", "conversation_id": conversation_id}

@@ -1,13 +1,14 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from app.core.job_queue import get_batch_job, get_batch_jobs, submit_batch_job
 from app.core.models import BatchJobCreateRequest, BatchJobListResponse, BatchJobRecord
+from app.core.security import require_admin
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
-@router.post("", response_model=BatchJobRecord)
+@router.post("", response_model=BatchJobRecord, dependencies=[Depends(require_admin)])
 def create_batch_job(request: BatchJobCreateRequest) -> BatchJobRecord:
     return submit_batch_job(request)
 
