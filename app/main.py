@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
@@ -17,6 +18,18 @@ from app.scenarios.code_review import code_review_scenario
 from app.scenarios.customer_complaint import customer_complaint_scenario
 from app.scenarios.technical_interview import technical_interview_scenario
 
+DEFAULT_CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+
+def get_cors_allowed_origins() -> list[str]:
+    configured_origins = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if not configured_origins:
+        return DEFAULT_CORS_ALLOWED_ORIGINS
+    return [origin.strip() for origin in configured_origins.split(",") if origin.strip()]
+
 
 def create_app() -> FastAPI:
     registry.register(code_review_scenario)
@@ -31,10 +44,7 @@ def create_app() -> FastAPI:
 
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-        ],
+        allow_origins=get_cors_allowed_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
