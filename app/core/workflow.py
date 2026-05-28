@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -9,6 +10,7 @@ from app.core.scoring import QualityScoringResult, score_conversation_quality
 
 
 END_ROUTE = "__quality_score__"
+logger = logging.getLogger(__name__)
 
 
 class SimulationWorkflowState(TypedDict, total=False):
@@ -123,6 +125,13 @@ def run_langgraph_simulation(
                 llm_success_count = state.get("llm_success_count", 0) + 1
                 mock_success_count = state.get("mock_success_count", 0)
             except Exception as error:
+                logger.warning(
+                    "Agent turn fell back to mock content: scenario=%s role=%s turn=%s",
+                    state["scenario"],
+                    role,
+                    turn_number,
+                    exc_info=True,
+                )
                 content = _fallback_content_for_role(state, role)
                 trace_mode = "mock"
                 error_text = str(error)[:500]

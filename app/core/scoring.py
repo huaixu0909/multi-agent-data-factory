@@ -1,9 +1,12 @@
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from app.core.llm import build_deepseek_client
 from app.core.models import Message, Persona, QualityReport, QualityScores
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,6 +47,7 @@ def score_conversation_quality(
             heuristic_scores=heuristic_scores,
         )
     except Exception as error:
+        logger.warning("LLM judge failed; using heuristic scoring", exc_info=True)
         return QualityScoringResult(
             scores=heuristic_scores,
             mode="heuristic_multi_judge",

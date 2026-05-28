@@ -381,6 +381,17 @@ def _json_list(value: object) -> list[str]:
     return [str(item) for item in parsed if str(item).strip()]
 
 
+CONVERSATION_SELECT_COLUMNS = """
+    conversation_id, task_type, scenario, task_input, language, code_diff,
+    review_focus, agents, messages, scores, accepted,
+    generation_mode, llm_provider, llm_model, llm_error,
+    scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
+    quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
+    workflow_engine, workflow_steps, agent_trace,
+    created_at
+"""
+
+
 def conversation_to_row(conversation: ConversationRecord) -> tuple:
     return (
         conversation.conversation_id,
@@ -843,14 +854,8 @@ def load_conversations(scenario: str | None = None) -> list[ConversationRecord]:
     with open_database() as connection:
         if scenario:
             rows = connection.execute(
-                """
-                SELECT conversation_id, task_type, scenario, task_input, language, code_diff,
-                       review_focus, agents, messages, scores, accepted,
-                       generation_mode, llm_provider, llm_model, llm_error,
-                       scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
-                       quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
-                       workflow_engine, workflow_steps, agent_trace,
-                       created_at
+                f"""
+                SELECT {CONVERSATION_SELECT_COLUMNS}
                 FROM conversations
                 WHERE scenario = ?
                 ORDER BY created_at DESC
@@ -859,14 +864,8 @@ def load_conversations(scenario: str | None = None) -> list[ConversationRecord]:
             ).fetchall()
         else:
             rows = connection.execute(
-                """
-                SELECT conversation_id, task_type, scenario, task_input, language, code_diff,
-                       review_focus, agents, messages, scores, accepted,
-                       generation_mode, llm_provider, llm_model, llm_error,
-                       scoring_mode, scoring_provider, scoring_model, scoring_error, score_feedback,
-                       quality_report, content_hash, duplicate_of, similarity_score, diversity_report,
-                       workflow_engine, workflow_steps, agent_trace,
-                       created_at
+                f"""
+                SELECT {CONVERSATION_SELECT_COLUMNS}
                 FROM conversations
                 ORDER BY created_at DESC
                 """
@@ -887,25 +886,55 @@ def query_conversations(
     page = max(1, page)
     page_size = max(1, min(page_size, 100))
     keyword = (q or "").strip().lower()
-    conversations = load_conversations(scenario=scenario)
 
-    filtered: list[ConversationRecord] = []
-    for conversation in conversations:
-        if accepted is not None and conversation.accepted != accepted:
-            continue
-        final_score = conversation.scores.final_score
-        if min_score is not None and final_score < min_score:
-            continue
-        if max_score is not None and final_score > max_score:
-            continue
-        if keyword and keyword not in _conversation_search_text(conversation):
-            continue
-        filtered.append(conversation)
+    where_clauses: list[str] = []
+    values: list[object] = []
+    if scenario:
+        where_clauses.append("scenario = ?")
+        values.append(scenario)
+    if accepted is not None:
+        where_clauses.append("accepted = ?")
+        values.append(1 if accepted else 0)
+    if min_score is not None:
+        where_clauses.append("CAST(json_extract(scores, '$.final_score') AS REAL) >= ?")
+        values.append(min_score)
+    if max_score is not None:
+        where_clauses.append("CAST(json_extract(scores, '$.final_score') AS REAL) <= ?")
+        values.append(max_score)
+    if keyword:
+        searchable_columns = """
+            lower(
+                conversation_id || ' ' || task_type || ' ' || scenario || ' ' ||
+                coalesce(language, '') || ' ' || coalesce(code_diff, '') || ' ' ||
+                task_input || ' ' || review_focus || ' ' || agents || ' ' ||
+                messages || ' ' || score_feedback
+            )
+        """
+        where_clauses.append(f"{searchable_columns} LIKE ?")
+        values.append(f"%{keyword}%")
 
-    total = len(filtered)
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    with open_database() as connection:
+        total = int(
+            connection.execute(
+                f"SELECT COUNT(*) FROM conversations {where_sql}",
+                values,
+            ).fetchone()[0]
+        )
+        rows = connection.execute(
+            f"""
+            SELECT {CONVERSATION_SELECT_COLUMNS}
+            FROM conversations
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*values, page_size, (page - 1) * page_size],
+        ).fetchall()
+
     total_pages = max(1, math.ceil(total / page_size))
-    start = (page - 1) * page_size
-    return filtered[start : start + page_size], total, total_pages
+    return [row_to_conversation(row) for row in rows], total, total_pages
 
 
 def query_all_conversations(

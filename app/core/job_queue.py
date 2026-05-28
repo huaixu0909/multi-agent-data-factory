@@ -1,3 +1,4 @@
+import logging
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,7 @@ from app.core.simulation_runner import run_and_store_simulation
 
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="data-factory-job")
 _submit_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 def submit_batch_job(request: BatchJobCreateRequest) -> BatchJobRecord:
@@ -54,6 +56,7 @@ def _run_batch_job(job_id: str) -> None:
             if conversation.accepted and conversation.scores.final_score >= job.min_score:
                 accepted += 1
         except Exception as error:
+            logger.warning("Batch job item failed: job_id=%s index=%s", job_id, index + 1, exc_info=True)
             failed += 1
             last_error = str(error)[:800]
 
